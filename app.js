@@ -3,7 +3,7 @@
    Слова и статусы живут в Google Таблице; приложение читает и пишет их через Apps Script.
    Локально (localStorage) хранится копия для работы без интернета. */
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.5.0';
 const DAY = 864e5;
 // Дни до следующего повторения для коробок 0..7.
 // 1 — «не знаю», 2..6 — «повторить» (через 1, 3, 7, 14, 30 дней), 7 — «выучил» (проверка раз в 14 дней).
@@ -102,13 +102,22 @@ function bar({ title, root = false, actions = '' }) {
 }
 
 // ---------- статусы и интервальное повторение ----------
-// В таблице: пусто (слово ещё не брали в работу) · «в процессе» · «повторить» · «не знаю» · «выучил».
-// «в процессе» — слово попало в партию; ошибки при первом изучении статус не портят.
-// «повторить» — выучено в партии, дальше повторения через 1, 3, 7, 14 и 30 дней.
-// «выучил» — верные ответы на всех повторениях подряд; ошибка на повторении — «не знаю», цепочка заново.
-// Коробки: b=0 (p=1 — в процессе), 1 — не знаю, 2..6 — повторить, 7 — выучил.
+// Статусы в таблице:
+//   пусто        — слово ещё не брали в работу;
+//   «в процессе» — слово взяли в партию; на всех повторениях пока отвечали верно;
+//   «повторить»  — на каком-то повторении была ошибка, цепочка повторений началась заново;
+//   «выучил»     — вся цепочка (1, 3, 7, 14, 30 дней) пройдена без ошибок;
+//   «не знаю»    — ставит только пользователь; приложение такие слова не трогает и не берёт в обычные занятия.
+// Запись: b — шаг цепочки (0 — ещё в партии, 1 — повторить сразу после ошибки, 2..6 — ждём повторения, 7 — выучил),
+//         p — слово взято в работу, e — была ошибка на повторении, n — «не знаю».
 const ST = { none: '', prog: 'в процессе', bad: 'не знаю', rep: 'повторить', ok: 'выучил' };
-const statusOf = r => !r || !r.b ? (r?.p ? ST.prog : ST.none) : r.b === 1 ? ST.bad : r.b >= 7 ? ST.ok : ST.rep;
+function statusOf(r) {
+  if (!r) return ST.none;
+  if (r.n) return ST.bad;
+  if (r.b >= 7) return ST.ok;
+  if (r.b >= 2 || r.p) return r.e ? ST.rep : ST.prog;
+  return ST.none;
+}
 function normStatus(s) {
   s = String(s || '').trim().toLowerCase().replace(/ё/g, 'е');
   if (/^выуч/.test(s)) return ST.ok;
@@ -118,39 +127,39 @@ function normStatus(s) {
   return ST.none;
 }
 const MLABEL = { new: 'Новые', progress: 'В процессе', learning: 'Не знаю', familiar: 'Повторить', mastered: 'Выучил' };
-function mastery(w) {
-  const r = P[w.id], b = r?.b || 0;
-  return b === 0 ? (r?.p ? 'progress' : 'new') : b === 1 ? 'learning' : b >= 7 ? 'mastered' : 'familiar';
-}
-const isDue = (w, now = Date.now()) => { const r = P[w.id]; return !!(r && r.b > 0 && r.d <= now); };
+const MKEY = { [ST.none]: 'new', [ST.prog]: 'progress', [ST.bad]: 'learning', [ST.rep]: 'familiar', [ST.ok]: 'mastered' };
+const mastery = w => MKEY[statusOf(P[w.id])];
+const toLearn = w => { const r = P[w.id]; return !r || (!r.b && !r.n); };
+const isDue = (w, now = Date.now()) => { const r = P[w.id]; return !!(r && !r.n && r.b > 0 && r.d <= now); };
 const blank = () => ({ b: 0, d: 0, c: 0, w: 0 });
 function commit(w, r) {
   r.t = w.t; r.sh = w.s; r.st = statusOf(r); r.u = Date.now();
   P[w.id] = r; saveP(); schedulePush();
 }
 function applyStatus(r, st, now) {
-  r.p = st === ST.prog ? 1 : 0;
+  r.n = st === ST.bad ? 1 : 0;
+  r.e = st === ST.rep ? 1 : 0;
+  r.p = st === ST.none ? 0 : 1;
   if (st === ST.ok) { r.b = 7; r.d = now + INTERVALS[7] * DAY; }
-  else if (st === ST.rep) { r.b = 2; r.d = now; }
-  else if (st === ST.bad) { r.b = 1; r.d = now; }
-  else { r.b = 0; r.d = 0; }
+  else if (st === ST.rep) { r.b = 1; r.d = now; }
+  else { r.b = 0; r.d = 0; } // «в процессе» вручную — слово снова пойдёт в партию; «не знаю» — отдельно
 }
 function grade(w, ok) {
   const now = Date.now();
   const prev = P[w.id] ? { ...P[w.id] } : null;
   const r = P[w.id] ? { ...P[w.id] } : blank();
-  if (ok) {
-    r.c = (r.c || 0) + 1;
-    // шаг вперёд только когда подошёл срок повторения (или слово ещё изучается)
-    if (!r.b || r.d <= now) { r.b = r.b >= 7 ? 7 : Math.max(2, r.b + 1); r.d = now + INTERVALS[r.b] * DAY; }
-    r.p = 0;
-  } else {
-    r.w = (r.w || 0) + 1;
-    if (!r.b) r.p = 1;                              // ещё изучается — остаётся «в процессе»
-    else if (r.b >= 7) { r.b = 2; r.d = now + DAY; } // ошибся в выученном — снова «повторить», цепочка с начала
-    else { r.b = 1; r.d = now; }
-  }
+  if (ok) r.c = (r.c || 0) + 1; else r.w = (r.w || 0) + 1;
   r.l = now;
+  if (!r.n) { // статус «не знаю» приложение не меняет
+    if (ok) {
+      // шаг вперёд только когда подошёл срок повторения (или слово ещё в партии)
+      if (!r.b || r.d <= now) { r.b = r.b >= 7 ? 7 : Math.max(2, r.b + 1); r.d = now + INTERVALS[r.b] * DAY; }
+      r.p = 1;
+    } else if (r.b >= 1) {
+      // ошибка на повторении (в том числе у выученного) — «повторить», цепочка с начала
+      r.b = 1; r.d = now; r.e = 1; r.p = 1;
+    } else r.p = 1;   // ошибка при первом изучении — слово остаётся «в процессе»
+  }
   commit(w, r);
   return () => commit(w, prev ? { ...prev } : blank());
 }
@@ -345,19 +354,24 @@ function reconcile() {
   return n;
 }
 
-// Разовый перенос (v2.4): до появления «в процессе» ошибка при первом изучении ставила «не знаю».
-// Слова, на которые ещё ни разу не ответили верно, переводим в «в процессе» — они доучатся в следующей партии.
-function migrateFirstMistakes() {
-  if (META.migr24) return;
+// Разовый перенос старых записей (до v2.5).
+// Раньше приложение само ставило «не знаю» (b=1) за ошибку, а «повторить» — всем словам в цепочке повторений.
+// Теперь «не знаю» ставит только пользователь, а цепочка без ошибок — это «в процессе».
+function migrateOld() {
   const now = Date.now();
   for (const w of uniqById(WORDS)) {
     const r = P[w.id];
-    if (!r || r.b !== 1 || r.c || r.p) continue;
-    const nr = { ...r };
-    applyStatus(nr, ST.prog, now);
-    commit(w, nr);
+    if (!r || r.n) continue;
+    let nr = null;
+    if (r.b === 1 && !r.p) {
+      nr = { ...r };
+      if (r.l !== r.d) applyStatus(nr, ST.bad, now);   // поставлено кнопкой — оставляем «не знаю»
+      else if (!r.c) applyStatus(nr, ST.prog, now);    // ошибка при первом изучении
+      else { nr.b = 1; nr.d = now; nr.e = 1; nr.p = 1; } // ошибка на повторении
+    } else if (r.b >= 2 && r.b < 7 && !r.p) nr = { ...r, p: 1, e: 0 };
+    if (nr) commit(w, nr);
   }
-  META.migr24 = 1; saveM();
+  META.migr25 = 1; saveM();
 }
 
 let syncing = false, pushing = false;
@@ -377,7 +391,7 @@ async function sync({ silent = false } = {}) {
     saveW();
     mergeProgress(j.progress);
     reconcile();
-    migrateFirstMistakes();
+    if (!META.migr25) migrateOld();
     await pushProgress(true);
     META.lastSync = Date.now(); META.lastError = ''; saveM();
     if (!silent) toast(`Синхронизировано: ${words(uniqById(WORDS).length)}`);
@@ -472,14 +486,14 @@ function viewHome() {
       <div class="row"><button class="btn primary" data-a="sync">${I.sync} Синхронизировать</button>
       <button class="btn" data-a="settings">Настройки</button></div></div>`;
   } else {
-    const fresh = st.new + st.progress;
+    const pending = all.filter(toLearn), unfinished = pending.length - st.new, fresh = pending.length;
     body = `<div class="stats">
         <div class="stat"><b>${all.length}</b><span>${plural(all.length, 'слово', 'слова', 'слов')}</span></div>
         <div class="stat"><b>${st.mastered}</b><span>выучил</span></div>
         <div class="stat"><b>${due}</b><span>повторить сейчас</span></div></div>
       ${due ? `<button class="btn primary big" data-a="review">${I.sync} Повторить · ${Math.min(due, S.session)} из ${due}</button>` : ''}
-      ${fresh ? `<button class="btn ${due ? '' : 'primary'} big" data-a="learnNew" style="margin-top:10px">${I.learn} ${st.progress ? 'Продолжить учить' : 'Учить новые'} · ${Math.min(fresh, S.session)} ${plural(Math.min(fresh, S.session), 'слово', 'слова', 'слов')}</button>
-        <p class="muted small center">${st.progress ? `В процессе: ${st.progress} · ` : ''}новых в очереди: ${st.new}. Учим по ${S.session} за раз.</p>` : ''}
+      ${fresh ? `<button class="btn ${due ? '' : 'primary'} big" data-a="learnNew" style="margin-top:10px">${I.learn} ${unfinished ? 'Продолжить учить' : 'Учить новые'} · ${Math.min(fresh, S.session)} ${plural(Math.min(fresh, S.session), 'слово', 'слова', 'слов')}</button>
+        <p class="muted small center">${unfinished ? `Недоучено в партии: ${unfinished} · ` : ''}новых в очереди: ${st.new}. Учим по ${S.session} за раз.</p>` : ''}
       ${!due && !fresh ? `<button class="btn primary big" data-a="open" data-k="*">${I.cards} На сегодня всё повторено</button>` : ''}
       ${META.lastError ? `<p class="err">${esc(META.lastError)}</p>` : ''}
       <h2 class="sec">Наборы</h2>
@@ -496,7 +510,7 @@ function viewHome() {
     sync: () => sync(),
     open: el => go(makeSet(el.dataset.k)),
     review: () => go(makeCards('Повторение', () => shuffle(dueWords()), { review: true })),
-    learnNew: () => { const pool = all.filter(w => ['new', 'progress'].includes(mastery(w))); go(makeQuiz('Новые слова', prioritize(pool, S.session), ['mc', 'write'], pool)); },
+    learnNew: () => { const pool = all.filter(toLearn); go(makeQuiz('Новые слова', prioritize(pool, S.session), ['mc', 'write'], pool)); },
     connect: () => saveScript(document.getElementById('surl').value),
     copycode: copyCode,
   });
@@ -624,7 +638,7 @@ function makeCards(title, source, { review = false } = {}) {
           <button class="ic" data-a="undo" aria-label="Отменить" ${hist.length ? '' : 'disabled'}>${I.undo}</button>
           <button class="btn yes" data-a="yes">${I.check} ${review ? 'Помню' : 'Знаю'} <b>${know.length}</b></button>
         </div>
-        <div class="stline"><span class="muted small">Статус в таблице:</span><div class="seg">${[ST.prog, ST.bad, ST.rep, ST.ok].map(s => `<button class="${statusOf(P[w.id]) === s ? 'on' : ''}" data-a="setst" data-v="${s}">${s}</button>`).join('')}</div></div>
+        <div class="stline"><span class="muted small">Статус в таблице:</span><div class="seg">${[ST.prog, ST.rep, ST.bad, ST.ok].map(s => `<button class="${statusOf(P[w.id]) === s ? 'on' : ''}" data-a="setst" data-v="${s}">${s}</button>`).join('')}</div></div>
         <div class="kbd">Пробел — перевернуть · ← ещё учу · → знаю · Z — отменить · S — озвучить</div>
       </div>`;
     if (!flipped) maybeAutoSpeak(front);
@@ -646,7 +660,7 @@ function makeCards(title, source, { review = false } = {}) {
     bind({
       no: () => answer(false), yes: () => answer(true), undo, shuf: () => { deck = shuffle(deck.slice(i)); i = 0; know = []; learn = []; hist = []; cur = null; flipped = false; v(); toast('Перемешано'); },
       star: el => el.classList.toggle('on', toggleStar(w)),
-      setst: el => { setStatus(w, el.dataset.v); toast(`«${w.t}»: ${el.dataset.v}`); v(); },
+      setst: el => { setStatus(w, el.dataset.v); toast(`«${w.t}»: ${el.dataset.v}${el.dataset.v === ST.bad ? ' — уберу из обычных занятий' : ''}`); v(); },
     });
     onKey = e => {
       if (e.key === ' ' || e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); flip(); }
@@ -1004,10 +1018,10 @@ function viewSettings() {
       <details><summary>Как работают статусы</summary>
         <ul>
           <li><b>пусто</b> — слово ещё не брали в работу.</li>
-          <li><b>в процессе</b> — слово попало в партию и вы начали его учить. Недоученные слова идут первыми в следующую партию.</li>
-          <li><b>повторить</b> — слово выучено в партии. Дальше оно приходит на повторение через 1, 3, 7, 14 и 30 дней.</li>
-          <li><b>не знаю</b> — ошибка на повторении. Слово повторяется сразу, цепочка начинается заново.</li>
-          <li><b>выучил</b> — верные ответы на всех повторениях подряд, включая последнее через 30 дней. Раз в 2 недели такие слова приходят на проверку, ошибка снова ставит «повторить».</li>
+          <li><b>в процессе</b> — слово взяли в партию по 5. Дальше оно приходит на повторение через 1, 3, 7, 14 и 30 дней. Статус держится, пока вы отвечаете на повторениях верно. Ошибки при первом изучении в партии не считаются.</li>
+          <li><b>повторить</b> — на каком-то повторении была ошибка. Цепочка повторений начинается заново.</li>
+          <li><b>выучил</b> — вся цепочка пройдена без единой ошибки. Раз в 2 недели такие слова приходят на проверку, ошибка снова ставит «повторить».</li>
+          <li><b>не знаю</b> — ставите только вы, кнопкой под карточкой или в таблице. Приложение такие слова не трогает и не берёт в обычные занятия. Потренировать их можно в наборе «Не знаю».</li>
           <li>Если поменять статус прямо в таблице, приложение примет его при синхронизации.</li>
         </ul></details>
     </div>
