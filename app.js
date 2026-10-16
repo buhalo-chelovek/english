@@ -3,7 +3,7 @@
    Слова и статусы живут в Google Таблице; приложение читает и пишет их через Apps Script.
    Локально (localStorage) хранится копия для работы без интернета. */
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 const DAY = 864e5;
 // Дни до следующего повторения для коробок 0..7.
 // 1 — «не знаю», 2..6 — «повторить» (через 1, 3, 7, 14, 30 дней), 7 — «выучил» (проверка раз в 14 дней).
@@ -345,6 +345,21 @@ function reconcile() {
   return n;
 }
 
+// Разовый перенос (v2.4): до появления «в процессе» ошибка при первом изучении ставила «не знаю».
+// Слова, на которые ещё ни разу не ответили верно, переводим в «в процессе» — они доучатся в следующей партии.
+function migrateFirstMistakes() {
+  if (META.migr24) return;
+  const now = Date.now();
+  for (const w of uniqById(WORDS)) {
+    const r = P[w.id];
+    if (!r || r.b !== 1 || r.c || r.p) continue;
+    const nr = { ...r };
+    applyStatus(nr, ST.prog, now);
+    commit(w, nr);
+  }
+  META.migr24 = 1; saveM();
+}
+
 let syncing = false, pushing = false;
 async function sync({ silent = false } = {}) {
   if (syncing) return;
@@ -362,6 +377,7 @@ async function sync({ silent = false } = {}) {
     saveW();
     mergeProgress(j.progress);
     reconcile();
+    migrateFirstMistakes();
     await pushProgress(true);
     META.lastSync = Date.now(); META.lastError = ''; saveM();
     if (!silent) toast(`Синхронизировано: ${words(uniqById(WORDS).length)}`);
