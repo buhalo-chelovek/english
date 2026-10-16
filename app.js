@@ -3,7 +3,7 @@
    Слова и статусы живут в Google Таблице; приложение читает и пишет их через Apps Script.
    Локально (localStorage) хранится копия для работы без интернета. */
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 const DAY = 864e5;
 // Дни до следующего повторения для коробок 0..7.
 // 1 — «не знаю», 2..6 — «повторить» (через 1, 3, 7, 14, 30 дней), 7 — «выучил» (проверка раз в 14 дней).
@@ -217,10 +217,14 @@ function norm(s, keepParens) {
   return x.replace(/[^\p{L}\p{N}' -]+/gu, ' ').replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
 }
 const stripArt = s => s.replace(/^(to|a|an|the) /, '');
+// Слова-заглушки не влияют на проверку: «увлекаться чем-то» = «увлекаться», «get rid of smth» = «get rid of».
+const FILLER_RU = /(^| )((о|об|от|в|во|на|с|со|за|к|ко|по|для|из|у|при|над|под|про) )?(что|чем|чего|чему|кого|кому|кем|ком|кто|какой|какого|какому|каким) (то|либо|нибудь)(?= |$)/g;
+const FILLER_EN = /(^| )(smth|sth|something|somebody|someone|smb|sb|one's|oneself)(?= |$)/g;
+const core = s => s.replace(FILLER_RU, ' ').replace(FILLER_EN, ' ').replace(/\s+/g, ' ').trim() || s;
 function variants(a) {
   const v = new Set([norm(a), norm(a, true)]);
   String(a).split(/[,;\/|]|\s+or\s+|\s+или\s+/i).forEach(p => v.add(norm(p)));
-  for (const x of [...v]) v.add(stripArt(x));
+  for (const x of [...v]) { v.add(stripArt(x)); v.add(core(x)); v.add(stripArt(core(x))); }
   v.delete('');
   return [...v];
 }
@@ -237,8 +241,8 @@ function lev(a, b) {
 function check(input, answer) {
   const n = norm(input);
   if (!n) return { ok: false };
-  const vs = variants(answer), n2 = stripArt(n);
-  if (vs.includes(n) || vs.includes(n2)) return { ok: true };
+  const vs = variants(answer), n2 = stripArt(core(n));
+  if ([n, stripArt(n), core(n), n2].some(x => vs.includes(x))) return { ok: true };
   for (const v of vs) if (v.length >= 4 && lev(n2, v) <= (v.length >= 8 ? 2 : 1)) return { ok: true, typo: true };
   return { ok: false };
 }
