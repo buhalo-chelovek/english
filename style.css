@@ -15,6 +15,7 @@
   --warn: #f5a524;
   --m-new: #c7ccd9;
   --m-learning: #ff8a4c;
+  --m-progress: #8b7cf6;
   --m-familiar: #3ccfcf;
   --m-mastered: #18ae79;
   --shadow: 0 2px 10px rgba(46, 56, 86, .08);
@@ -133,6 +134,7 @@ code { background: var(--surface-2); padding: 1px 5px; border-radius: 5px; font-
 .mbar i { display: block; height: 100%; }
 .m-new { background: var(--m-new); }
 .m-learning { background: var(--m-learning); }
+.m-progress { background: var(--m-progress); }
 .m-familiar { background: var(--m-familiar); }
 .m-mastered { background: var(--m-mastered); }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); margin-top: 8px; }
@@ -185,7 +187,9 @@ code { background: var(--surface-2); padding: 1px 5px; border-radius: 5px; font-
 .cardctl .btn b { font-weight: 700; opacity: .75; }
 .cardctl .no { color: var(--warn); }
 .cardctl .yes { color: var(--ok); }
-.stline { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+.stline { display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 16px auto 0; max-width: 460px; }
+.stline .seg { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); width: 100%; }
+.stline .seg button { padding: 7px 4px; font-size: 13px; }
 .kbd { text-align: center; color: var(--muted); font-size: 12px; margin-top: 14px; }
 @media (hover: none) { .kbd { display: none; } }
 
