@@ -1,5 +1,5 @@
 // Сначала сеть (чтобы обновления приходили сразу), без сети — из кэша.
-const CACHE = 'moi-slova-v2';
+const CACHE = 'moi-slova-v3';
 const ASSETS = ['./', 'index.html', 'app.js', 'style.css', 'manifest.webmanifest', 'apps-script.gs',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 

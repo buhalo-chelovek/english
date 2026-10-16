@@ -3,7 +3,7 @@
    Слова и статусы живут в Google Таблице; приложение читает и пишет их через Apps Script.
    Локально (localStorage) хранится копия для работы без интернета. */
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 const DAY = 864e5;
 // Дни до следующего повторения для коробок 0..7.
 // 1 — «не знаю», 2..6 — «повторить» (через 1, 3, 7, 14, 30 дней), 7 — «выучил» (проверка раз в 14 дней).
@@ -16,10 +16,11 @@ const LS = {
 };
 const K = { settings: 'ew.settings', words: 'ew.words', progress: 'ew.progress', meta: 'ew.meta' };
 const DEFAULTS = {
-  script: '', token: '', dir: 'td', filter: 'unlearned', session: 20,
+  script: '', token: '', dir: 'td', filter: 'unlearned', session: 5,
   autoSpeak: false, voice: '', rate: 0.9, theme: 'auto', autoSync: true, shuffle: true,
 };
 let S = Object.assign({}, DEFAULTS, LS.get(K.settings, {}));
+if ((S.v || 0) < 2) { S.session = 5; S.v = 2; LS.set(K.settings, S); } // v2: учим партиями по 5
 let WORDS = LS.get(K.words, []);
 let P = LS.get(K.progress, {});
 let META = Object.assign({ lastSync: 0, pushedAt: 0, best: {}, lastError: '', tabs: [] }, LS.get(K.meta, {}));
@@ -161,10 +162,15 @@ function stats(list) {
 }
 function uniqById(list) { const seen = new Set(); return list.filter(w => !seen.has(w.id) && seen.add(w.id)); }
 function dueWords() { const now = Date.now(); return uniqById(WORDS.filter(w => isDue(w, now))); }
+// Порядок слов в партии: сначала те, что пора повторить, потом новые — по порядку из таблицы, потом остальные.
 function prioritize(list, n) {
-  const now = Date.now();
-  const score = w => { const r = P[w.id]; if (!r || !r.b) return 1; if (r.d <= now) return 0; return 1 + r.b; };
-  return shuffle(list).sort((a, b) => score(a) - score(b)).slice(0, n);
+  const now = Date.now(), due = [], fresh = [], rest = [];
+  for (const w of uniqById(list)) {
+    const r = P[w.id];
+    if (!r || !r.b) fresh.push(w); else if (r.d <= now) due.push(w); else rest.push(w);
+  }
+  rest.sort((a, b) => P[a.id].b - P[b.id].b);
+  return [...shuffle(due), ...fresh, ...rest].slice(0, n);
 }
 function mbar(list) {
   const s = stats(list), n = list.length || 1;
@@ -437,14 +443,15 @@ function viewHome() {
       <div class="row"><button class="btn primary" data-a="sync">${I.sync} Синхронизировать</button>
       <button class="btn" data-a="settings">Настройки</button></div></div>`;
   } else {
-    const fresh = st.new + st.learning;
+    const fresh = st.new;
     body = `<div class="stats">
         <div class="stat"><b>${all.length}</b><span>${plural(all.length, 'слово', 'слова', 'слов')}</span></div>
         <div class="stat"><b>${st.mastered}</b><span>выучил</span></div>
         <div class="stat"><b>${due}</b><span>повторить сейчас</span></div></div>
-      ${due ? `<button class="btn primary big" data-a="review">${I.sync} Повторить сейчас · ${due}</button>`
-        : fresh ? `<button class="btn primary big" data-a="learnNew">${I.learn} Учить слова · ${fresh}</button>`
-        : `<button class="btn primary big" data-a="open" data-k="*">${I.cards} На сегодня всё повторено</button>`}
+      ${due ? `<button class="btn primary big" data-a="review">${I.sync} Повторить · ${Math.min(due, S.session)} из ${due}</button>` : ''}
+      ${fresh ? `<button class="btn ${due ? '' : 'primary'} big" data-a="learnNew" style="margin-top:10px">${I.learn} Учить новые · ${Math.min(fresh, S.session)} ${plural(Math.min(fresh, S.session), 'слово', 'слова', 'слов')}</button>
+        <p class="muted small center">Новых слов в очереди: ${fresh}. Учим по ${S.session} за раз.</p>` : ''}
+      ${!due && !fresh ? `<button class="btn primary big" data-a="open" data-k="*">${I.cards} На сегодня всё повторено</button>` : ''}
       ${META.lastError ? `<p class="err">${esc(META.lastError)}</p>` : ''}
       <h2 class="sec">Наборы</h2>
       <div class="sets">${[...m].map(([name, ws]) => setCard(name, name, ws)).join('')}
@@ -459,8 +466,8 @@ function viewHome() {
     settings: () => go(viewSettings),
     sync: () => sync(),
     open: el => go(makeSet(el.dataset.k)),
-    review: () => go(makeCards('Повторение', shuffle(dueWords()), { review: true })),
-    learnNew: () => go(makeQuiz('Учить слова', prioritize(all.filter(w => ['new', 'learning'].includes(mastery(w))), S.session), ['mc', 'write'])),
+    review: () => go(makeCards('Повторение', () => shuffle(dueWords()), { review: true })),
+    learnNew: () => { const pool = all.filter(w => mastery(w) === 'new'); go(makeQuiz('Новые слова', prioritize(pool, S.session), ['mc', 'write'], pool)); },
     connect: () => saveScript(document.getElementById('surl').value),
     copycode: copyCode,
   });
@@ -513,7 +520,7 @@ function makeSet(key) {
           <div class="seg">${seg('dir', 'td', 'EN → RU')}${seg('dir', 'dt', 'RU → EN')}${seg('dir', 'mix', 'Микс')}</div>
           <div class="seg">${seg('filter', 'all', 'Все')}${seg('filter', 'unlearned', 'Без выученных')}${seg('filter', 'starred', '★')}</div>
         </div>
-        <p class="muted small">В занятии: ${words(list.length)} из ${all.length}${list.length > S.session ? ` (в «Заучивании» и «Письме» — по ${S.session} за раз)` : ''}</p>
+        <p class="muted small">В занятии: ${words(list.length)} из ${all.length}${list.length > S.session ? ` (учим партиями по ${S.session})` : ''}</p>
         <input id="q" type="search" placeholder="Поиск по словам" value="${esc(query)}" autocomplete="off">
         <ul class="words" id="wl"></ul>
       </main>`;
@@ -525,7 +532,7 @@ function makeSet(key) {
         const L = applyFilter(listFor(key), key);
         if (!L.length) return toast('Нет слов для занятия — смените фильтр');
         const t = setTitle(key), m = el.dataset.m;
-        if (m === 'cards') go(makeCards(t, S.shuffle ? shuffle(L) : L));
+        if (m === 'cards') go(makeCards(t, S.shuffle ? shuffle(L) : prioritize(L, L.length)));
         if (m === 'learn') go(makeQuiz(t, prioritize(L, S.session), ['mc', 'write'], L));
         if (m === 'write') go(makeQuiz(t, prioritize(L, S.session), ['write'], L));
         if (m === 'test') go(makeTest(t, L));
@@ -551,9 +558,19 @@ function makeSet(key) {
 }
 
 // ---------- Карточки ----------
-function makeCards(title, deck, { review = false } = {}) {
-  let i = 0, flipped = false, know = [], learn = [], hist = [];
+// source — список слов или функция, возвращающая актуальный список (для повторения).
+// Карточки идут партиями по S.session слов.
+function makeCards(title, source, { review = false } = {}) {
+  let i = 0, flipped = false, know = [], learn = [], hist = [], batch = 0;
   let cur = null;
+  const seen = new Set();
+  const left = () => (typeof source === 'function' ? source() : source).filter(w => !seen.has(w.id));
+  let deck = [];
+  function nextBatch() {
+    deck = left().slice(0, S.session); deck.forEach(w => seen.add(w.id));
+    batch++; i = 0; know = []; learn = []; hist = []; cur = null; flipped = false;
+  }
+  nextBatch();
   const v = () => (i >= deck.length ? end() : card());
   function card() {
     const w = deck[i];
@@ -562,7 +579,7 @@ function makeCards(title, deck, { review = false } = {}) {
     app.innerHTML = `${bar({ title, actions: review ? '' : `<button class="ic" data-a="shuf" title="Перемешать" aria-label="Перемешать">${I.shuffle}</button>` })}
       <div class="study">
         <div class="progress"><i style="width:${i / deck.length * 100}%"></i></div>
-        <div class="counter">${i + 1} / ${deck.length}</div>
+        <div class="counter">${i + 1} / ${deck.length}${batch > 1 ? ` · партия ${batch}` : ''}</div>
         <div class="flip" id="fl" style="margin-top:12px">
           <div class="card3d ${flipped ? 'flipped' : ''}" id="c3">
             <div class="face front"><span class="side">${isRu(front) ? 'Перевод' : 'Слово'}</span>
@@ -626,18 +643,21 @@ function makeCards(title, deck, { review = false } = {}) {
     h.undo(); i--; (h.ok ? know : learn).pop(); flipped = false; cur = null; v();
   }
   function end() {
+    const rest = left().length;
     app.innerHTML = `${bar({ title })}<div class="study"><div class="card done">
       <div class="emoji">${learn.length ? '💪' : '🎉'}</div>
-      <h2>${review ? 'Повторение закончено' : 'Колода пройдена!'}</h2>
+      <h2>Партия пройдена!</h2>
       <p class="muted">${review ? 'Помню' : 'Знаю'}: <b>${know.length}</b> · ${review ? 'Забыл' : 'Ещё учу'}: <b>${learn.length}</b></p>
       <div class="stack" style="margin-top:16px">
         ${learn.length ? `<button class="btn primary" data-a="again">Повторить незнакомые · ${learn.length}</button>` : ''}
+        ${rest ? `<button class="btn ${learn.length ? '' : 'primary'}" data-a="next">Следующие ${Math.min(rest, S.session)} · осталось ${rest}</button>` : ''}
         ${learn.length ? `<button class="btn" data-a="learnIt">Заучить незнакомые</button>` : ''}
         <button class="btn" data-a="restart">Начать заново</button>
         <button class="btn ghost" data-a="back">Готово</button>
       </div></div></div>`;
     bind({
       again: () => { deck = shuffle(learn); i = 0; know = []; learn = []; hist = []; v(); },
+      next: () => { nextBatch(); v(); },
       learnIt: () => { nav[nav.length - 1] = makeQuiz(title, shuffle(learn), ['mc', 'write']); draw(); },
       restart: () => { deck = shuffle(deck); i = 0; know = []; learn = []; hist = []; v(); },
     });
@@ -647,8 +667,8 @@ function makeCards(title, deck, { review = false } = {}) {
 }
 
 // ---------- Заучивание / Письмо ----------
-function makeQuiz(title, list, stages, pool = list) {
-  const ROUND = 7;
+function makeQuiz(title, list, stages, pool = list, done = new Set()) {
+  const ROUND = Math.min(7, Math.max(5, S.session));
   const items = shuffle(list).map(w => ({ w, st: 0, miss: false }));
   let queue = [], round = 0, rr = { ok: 0, n: 0 }, cur = null, phase = 'q'; // раунд: каждое слово спрашивается один раз
   const remaining = () => items.filter(it => it.st < stages.length);
@@ -759,17 +779,19 @@ function makeQuiz(title, list, stages, pool = list) {
       <div class="legend" style="justify-content:center"><span><i class="m-mastered"></i>Готово ${done}</span><span><i class="m-learning"></i>В процессе ${mid}</span><span><i class="m-new"></i>Осталось ${n - done - mid}</span></div>`;
   }
   function finish() {
+    items.forEach(it => done.add(it.w.id));
+    const rest = pool.filter(w => !done.has(w.id));
     const hard = items.filter(it => it.miss);
     app.innerHTML = `${bar({ title })}<div class="study"><div class="card done">
       <div class="emoji">🎉</div><h2>Отлично, всё выучено!</h2>
       <p class="muted">${words(items.length)}, без ошибок — ${items.length - hard.length}</p>
       ${hard.length ? `<ul class="review">${hard.map(it => `<li class="bad"><div class="q">${esc(it.w.t)}</div><div class="a">${esc(it.w.d)}</div></li>`).join('')}</ul>` : ''}
       <div class="stack" style="margin-top:16px">
-        ${pool.length > items.length ? `<button class="btn primary" data-a="more">Следующие слова</button>` : ''}
+        ${rest.length ? `<button class="btn primary" data-a="more">Следующие ${Math.min(rest.length, S.session)} · осталось ${rest.length}</button>` : ''}
         <button class="btn" data-a="again">Пройти ещё раз</button>
         <button class="btn ghost" data-a="back">Готово</button></div></div></div>`;
     bind({
-      more: () => { nav[nav.length - 1] = makeQuiz(title, prioritize(pool, S.session), stages, pool); draw(); },
+      more: () => { nav[nav.length - 1] = makeQuiz(title, prioritize(rest, S.session), stages, pool, done); draw(); },
       again: () => { nav[nav.length - 1] = makeQuiz(title, list, stages, pool); draw(); },
     });
   }
@@ -961,8 +983,8 @@ function viewSettings() {
 
     <div class="card">
       <h2>Занятия</h2>
-      <label class="lbl">Слов за одно «Заучивание» / «Письмо»</label>
-      <div class="seg">${[10, 15, 20, 30, 50].map(n => seg('session', n, n)).join('')}</div>
+      <label class="lbl">Слов в одной партии</label>
+      <div class="seg">${[5, 7, 10, 15, 20].map(n => seg('session', n, n)).join('')}</div>
       <label class="switch">Перемешивать карточки <input type="checkbox" data-s="shuffle" ${S.shuffle ? 'checked' : ''}></label>
       <label class="switch">Автоматически озвучивать английские слова <input type="checkbox" data-s="autoSpeak" ${S.autoSpeak ? 'checked' : ''}></label>
       <label class="switch">Синхронизировать автоматически <input type="checkbox" data-s="autoSync" ${S.autoSync ? 'checked' : ''}></label>
